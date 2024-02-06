@@ -4,7 +4,22 @@
 #include <string>
 #include <unordered_map>
 #include <algorithm>
+#include <sstream>
 #include <regex>
+
+const double AvogadroNumber = 6.02214076e+23; // 아보가드로 수
+double scat = 0.0, cap = 0.0, fis = 0.0;
+
+struct Isotope {
+    int massNumber; // 질량 수
+    double weightPercent; // weight percent
+    double numberDensity; // 수밀도
+};
+
+// ND를 계산하는 함수
+double calculateND(double density, double totalMass, double weightPercent, int massNumber) {
+    return (density * weightPercent * AvogadroNumber) / (totalMass * 1e-24);
+}
 
 struct CrossSection {
     std::vector<std::vector<double>> data;
@@ -50,7 +65,7 @@ std::vector<int> extractIsotopes(const std::string& filePath) {
 int main() {
     std::string basePath = "D:\\input\\XS\\ENDF71\\";
     std::string mcsgPath = "D:\\input\\code_develop\\mcsg_inputs\\mcsg_test.txt";
-    double incidentErg = 0.3;
+    double incidentErg = 0.1;
 
     std::unordered_map<int, CrossSection> captures, fissions, scatterings;
     auto isotopes = extractIsotopes(mcsgPath);
