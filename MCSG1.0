@@ -7,6 +7,8 @@
 #include <sstream>
 #include <regex>
 
+/Users/geun/Desktop/Code Development/endf71_raw
+
 const double AvogadroNumber = 6.02214076e+23; // 아보가드로 수
 double scat = 0.0, cap = 0.0, fis = 0.0;
 
@@ -62,6 +64,7 @@ std::vector<int> extractIsotopes(const std::string& filePath) {
     return isotopes;
 }
 
+// "/Users/geun/Desktop/Code Development/endf71_raw"
 int main() {
     std::string basePath = "D:\\input\\XS\\ENDF71\\";
     std::string mcsgPath = "D:\\input\\code_develop\\mcsg_inputs\\mcsg_test.txt";
