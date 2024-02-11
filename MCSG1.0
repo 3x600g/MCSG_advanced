@@ -1,90 +1,126 @@
-#include <iostream>
 #include <fstream>
-#include <vector>
-#include <string>
-#include <unordered_map>
-#include <algorithm>
 #include <sstream>
-#include <regex>
+#include <vector>
+#include <iostream>
+#include <string>
 
-const double AvogadroNumber = 6.02214076e+23; // 아보가드로 수
-double scat = 0.0, cap = 0.0, fis = 0.0;
+class Surface {
+public:
+    int s_number;
+    std::string s_type;
+    std::vector<double> s_parameters; // 다양한 파라미터를 저장하기 위한 벡터
 
-struct Isotope {
-    int massNumber; // 질량 수
-    double weightPercent; // weight percent
-    double numberDensity; // 수밀도
+    // 생성자는 타입과 숫자, 그리고 파라미터 리스트를 받습니다.
+    Surface(int num, const std::string& typ, const std::vector<double>& params)
+            : s_number(num), s_type(typ), s_parameters(params) {}
 };
 
-// ND를 계산하는 함수
-double calculateND(double density, double totalMass, double weightPercent, int massNumber) {
-    return (density * weightPercent * AvogadroNumber) / (totalMass * 1e-24);
-}
-
-struct CrossSection {
-    std::vector<std::vector<double>> data;
-
-    double interpolate(double incidentErg) {
-        if (data.empty()) return -1;
-        for (int i = 0; i < data.size() - 1; ++i) {
-            if (incidentErg >= data[i][0] && incidentErg <= data[i + 1][0]) {
-                double x0 = data[i][0], y0 = data[i][1];
-                double x1 = data[i + 1][0], y1 = data[i + 1][1];
-                return y0 + (incidentErg - x0) * (y1 - y0) / (x1 - x0);
-            }
-        }
-        return -1; // Out of range
-    }
-};
-
-std::vector<std::vector<double>> readCrossSection(const std::string& filePath) {
-    std::vector<std::vector<double>> xsData;
-    std::ifstream file(filePath);
-    double energy, xs;
-    while (file >> energy >> xs) {
-        xsData.push_back({energy, xs});
-    }
-    return xsData;
-}
-
-std::vector<int> extractIsotopes(const std::string& filePath) {
-    std::vector<int> isotopes;
+std::vector<Surface> readSurfaceCards(const std::string& filePath) {
     std::ifstream file(filePath);
     std::string line;
-    std::regex isotopeRegex("\\b\\d{5}\\b");
-    while (std::getline(file, line)) {
-        std::smatch matches;
-        while (std::regex_search(line, matches, isotopeRegex)) {
-            isotopes.push_back(std::stoi(matches[0]));
-            line = matches.suffix();
+    std::vector<Surface> surfaces;
+    bool readingSurfaceCards = false;
+
+    while (getline(file, line)) {
+        if (line.find("surface card") != std::string::npos) {
+            readingSurfaceCards = true;
+        }
+        if (line.find("end surface card") != std::string::npos) break; // 읽기를 중단합니다.
+
+        if (readingSurfaceCards) {
+            std::istringstream iss(line);
+            int num;
+            std::string type;
+            std::vector<double> params;
+            double param;
+
+            iss >> num >> type;
+            while (iss >> param) {
+                params.push_back(param); // 파라미터를 벡터에 추가합니다.
+            }
+            surfaces.emplace_back(Surface(num, type, params));
         }
     }
-    return isotopes;
+    return surfaces;
 }
 
-// "/Users/geun/Desktop/Code Development/endf71_raw"
+class Material {
+public:
+    int m_number;
+    double m_density;
+    std::vector<std::pair<int, double>> composition; // 원소 번호와 weight percent
+    double totalMass = 0.0;
+    std::vector<double> numberDensities; // 원소별 number density
+
+    Material(int num, double dens) : m_number(num), m_density(dens) {}
+
+    void addElement(int atomicNumber, double weightPercent) {
+        composition.push_back({atomicNumber, weightPercent});
+    }
+    void calculateTotalMass() {
+        for (auto& element : composition) {
+            int massNumber = element.first % 1000; // 원자 번호에서 질량 수를 추출
+            double weight = element.second;
+            totalMass += massNumber * (weight / 100.0);
+        }
+    }
+    void calculateNumberDensities() {
+        const double NA = 6.02e23; // 아보가드로 수
+        for (auto& element : composition) {
+            int massNumber = element.first % 1000;
+            double weightPercent = element.second;
+            double nd = (weightPercent / 100.0) * m_density * NA / totalMass;
+            numberDensities.push_back(nd);
+        }
+    }
+};
+
+std::vector<Material> readMaterialCards(const std::string& filePath) {
+    std::ifstream file(filePath);
+    std::string line;
+    std::vector<Material> materials;
+    bool readingMaterialCards = false;
+
+    while (getline(file, line)) {
+        if (line.find("material card") != std::string::npos) {
+            readingMaterialCards = true;
+            // continue;
+        }
+        if (line.find("end material card") != std::string::npos) break;
+
+        if (readingMaterialCards) {
+            std::istringstream iss(line);
+            int num;
+            double density;
+            iss >> num >> density;
+            Material material(num, density);
+
+            int atomicNumber;
+            double weightPercent;
+            while (iss >> atomicNumber >> weightPercent) {
+                material.addElement(atomicNumber, weightPercent);
+            }
+            material.calculateTotalMass();
+            material.calculateNumberDensities();
+            materials.push_back(material);
+        }
+    }
+    return materials;
+}
+
 int main() {
-    std::string basePath = "D:\\input\\XS\\ENDF71\\";
-    std::string mcsgPath = "D:\\input\\code_develop\\mcsg_inputs\\mcsg_test.txt";
-    double incidentErg = 0.1;
+    std::string filePath = "D:\\input\\code_develop\\mcsg_inputs\\mcsg_test.txt"; // 파일 경로 수정 필요
+    auto surfaces = readSurfaceCards(filePath);
+    auto materials = readMaterialCards(filePath);
 
-    std::unordered_map<int, CrossSection> captures, fissions, scatterings;
-    auto isotopes = extractIsotopes(mcsgPath);
-
-    for (int isotope : isotopes) {
-        captures[isotope].data = readCrossSection(basePath + std::to_string(isotope) + "_capture.txt");
-        fissions[isotope].data = readCrossSection(basePath + std::to_string(isotope) + "_fission.txt");
-        scatterings[isotope].data = readCrossSection(basePath + std::to_string(isotope) + "_scattering.txt");
+    for (const auto& material : materials) {
+        std::cout << "Material Number: " << material.m_number << ", Density: " << material.m_density << ", Total Mass: " << material.totalMass << std::endl;
+        std::cout << "Number Densities: ";
+        for (const auto& nd : material.numberDensities) {
+            std::cout << nd << " ";
+        }
+        std::cout << std::endl;
     }
-
-    for (int isotope : isotopes) {
-        double captureXS = captures[isotope].interpolate(incidentErg);
-        double fissionXS = fissions[isotope].interpolate(incidentErg);
-        double scatteringXS = scatterings[isotope].interpolate(incidentErg);
-
-        std::cout << "Isotope: " << isotope << std::endl;
-        std::cout << "Capture XS: " << captureXS << ", Fission XS: " << fissionXS << ", Scattering XS: " << scatteringXS << std::endl;
-    }
-
+    std::cout << materials[1].numberDensities[2] << std::endl;
     return 0;
 }
