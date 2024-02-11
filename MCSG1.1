@@ -1,0 +1,178 @@
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <iostream>
+#include <string>
+
+class Surface {
+public:
+    int s_number;
+    std::string s_type;
+    std::vector<double> s_parameters; // 다양한 파라미터를 저장하기 위한 벡터
+
+    // 생성자는 surface 번호, 타입(원, 원기둥, 직육면체..)과, 그리고 파라미터(반지름, 높이 ..)들을 받음.
+    Surface(int num, const std::string& typ, const std::vector<double>& params)
+            : s_number(num), s_type(typ), s_parameters(params) {}
+};
+
+std::vector<Surface> readSurfaceCards(const std::string& filePath) {
+    std::ifstream file(filePath);
+    std::string line;
+    std::vector<Surface> surfaces;
+    bool readingSurfaceCards = false;
+
+    while (getline(file, line)) {
+        if (line.find("surface card") != std::string::npos) {
+            readingSurfaceCards = true;
+        }
+        if (line.find("end surface card") != std::string::npos) break; // "end surface card" = 읽기를 중단.
+
+        if (readingSurfaceCards) {
+            std::istringstream iss(line);
+            int num;
+            std::string type;
+            std::vector<double> params;
+            double param;
+
+            iss >> num >> type;
+            while (iss >> param) {
+                params.push_back(param); // 파라미터를 벡터에 추가.
+            }
+            surfaces.emplace_back(Surface(num, type, params));
+        }
+    }
+    return surfaces;
+}
+
+class Material {
+public:
+    int m_number;
+    double m_density;
+    std::vector<std::pair<int, double>> composition; // 원소 번호와 weight percent
+    double totalMass = 0.0;
+    std::vector<double> numberDensities; // 원소별 number density
+
+    Material(int num, double dens) : m_number(num), m_density(dens) {}
+
+    void addElement(int atomicNumber, double weightPercent) {
+        composition.push_back({atomicNumber, weightPercent});
+    }
+    void calculateTotalMass() {
+        for (auto& element : composition) {
+            int massNumber = element.first % 1000; // 원자 번호에서 질량 수를 추출
+            double weight = element.second;
+            totalMass += massNumber * (weight / 100.0);
+        }
+    }
+    void calculateNumberDensities() {  // 위의 total mass를 통해 원소별 수밀도 계산
+        const double NA = 6.02e23; // 아보가드로 수
+        for (auto& element : composition) {
+            int massNumber = element.first % 1000;
+            double weightPercent = element.second;
+            double nd = (weightPercent / 100.0) * m_density * NA / totalMass;
+            numberDensities.push_back(nd);
+        }
+    }
+};
+
+std::vector<Material> readMaterialCards(const std::string& filePath) {
+    std::ifstream file(filePath);
+    std::string line;
+    std::vector<Material> materials;
+    bool readingMaterialCards = false;
+
+    while (getline(file, line)) {
+        if (line.find("material card") != std::string::npos) {
+            readingMaterialCards = true;
+            // continue;
+        }
+        if (line.find("end material card") != std::string::npos) break;
+
+        if (readingMaterialCards) {
+            std::istringstream iss(line);
+            int num;
+            double density;
+            iss >> num >> density;
+            Material material(num, density);
+
+            int atomicNumber;
+            double weightPercent;
+            while (iss >> atomicNumber >> weightPercent) {
+                material.addElement(atomicNumber, weightPercent);
+            }
+            material.calculateTotalMass();
+            material.calculateNumberDensities();
+            materials.push_back(material);
+        }
+    }
+    return materials;
+}
+class CellCard {
+public:
+    int cellNumber;
+    int c_materialNumber;
+    std::vector<std::pair<int, bool>> c_surfaces; // <surface number, inside (true) or outside (false)>
+
+    CellCard(int cellNum, int matNum) : cellNumber(cellNum), c_materialNumber(matNum) {}
+
+    void addSurface(int surfaceNumber, bool inside) {
+        c_surfaces.push_back({surfaceNumber, inside});
+    }
+};
+
+std::vector<CellCard> readCellCards(const std::string& filePath) {
+    std::vector<CellCard> cellCards;
+    std::ifstream file(filePath);
+    std::string line;
+    bool readingCellCards = false;
+
+    while (getline(file, line)) {
+        if (line == "cell card") {
+            readingCellCards = true;
+            // continue;
+        } else if (line == "end cell card") {
+            break;
+        }
+
+        if (readingCellCards) {
+            std::istringstream iss(line);
+            int cellNum, matNum, surfaceNum;
+            iss >> cellNum >> matNum;
+            CellCard cellCard(cellNum, matNum);
+
+            while (iss >> surfaceNum) {
+                bool inside = surfaceNum > 0;
+                cellCard.addSurface(abs(surfaceNum), inside);
+            }
+            cellCards.push_back(cellCard);
+        }
+    }
+
+    return cellCards;
+}
+
+int main() {
+    std::string filePath = "D:\\input\\code_develop\\mcsg_inputs\\mcsg_test.txt"; // 파일 경로 수정 필요
+    auto surfaces = readSurfaceCards(filePath);
+    auto materials = readMaterialCards(filePath);
+    auto cellCards = readCellCards(filePath);
+
+    for (const auto& material : materials) {
+        std::cout << "Material Number: " << material.m_number << ", Density: " << material.m_density << ", Total Mass: " << material.totalMass << std::endl;
+        std::cout << "Number Densities: ";
+        for (const auto& nd : material.numberDensities) {
+            std::cout << nd << " ";
+        }
+        std::cout << std::endl;
+    }
+    std::cout << materials[1].numberDensities[2] << std::endl;
+
+    for (const auto& cellCard : cellCards) {
+        std::cout << "Cell Number: " << cellCard.cellNumber << ", Material Number: " << cellCard.c_materialNumber << std::endl;
+        for (const auto& surface : cellCard.c_surfaces) {
+            std::cout << "Surface Number: " << surface.first << ", Inside: " << (surface.second ? "Yes" : "No") << std::endl;
+        }
+    }
+
+    return 0;
+}
