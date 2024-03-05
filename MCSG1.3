@@ -1,0 +1,321 @@
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <iostream>
+#include <string>
+#include <random>
+#include <ctime>
+#include <cmath>
+
+double xi, x, y, z, r = 0.0, FN_num, n_energy, scat, cap, fis, scat_fraction, fis_fraction;
+double tmp_erg, incident_erg, theta, phi, cos_theta, sin_theta, cos_phi, sin_phi, nps, mass_num;
+const double pi = 3.1415827;
+int cycle = 0, skipped_cycle = 0, cycle_alarm = 0, area_out = 0;
+void XI_GEN(), ANGLE_GEN(), FISSION_NEUTRON_NUM(), N_ENERGY_GEN(), NEUTRON_SPECTRA();
+
+class Surface {
+public:
+    int s_number;
+    std::string s_type;
+    std::vector<double> s_parameters; // 다양한 파라미터를 저장하기 위한 벡터
+    std::string i_boundary, o_boundary;
+
+    // 생성자는 surface 번호, 타입(원, 원기둥, 직육면체..)과, 그리고 파라미터(반지름, 높이 ..)들을 받음.
+    Surface(int num, const std::string& typ, const std::vector<double>& params)
+            : s_number(num), s_type(typ), s_parameters(params) {
+        setInnerBoundary();
+        setOuterBoundary();
+    }
+    void setInnerBoundary() {
+        if (s_type == "so") {
+            i_boundary = "pow(x, 2) + pow(y, 2) + pow(z, 2) <= pow(" + std::to_string(s_parameters[0]) + ",2)";
+        }
+        else if (s_type == "cu") {
+            // 여기서는 cy 타입에 대한 경계조건을 문자열로 설정합니다.
+            // 예시에 따라, cy는 6개의 파라미터를 가진다고 가정합니다.
+            i_boundary = "(" + std::to_string(s_parameters[0]) + " <= x <= " + std::to_string(s_parameters[1]) + ") && ("
+                    + std::to_string(s_parameters[2]) + " <= y <= " + std::to_string(s_parameters[3]) + ") && ("
+                    + std::to_string(s_parameters[4]) + " <= z <= " + std::to_string(s_parameters[5]) + ")";
+        }
+        else if (s_type == "cy"){
+            i_boundary =  "pow(" + std::to_string(s_parameters[0]) + " - x, 2) + pow(" + std::to_string(s_parameters[2]) + " - x, 2) <= pow("
+                    + std::to_string(s_parameters[6]) + ", 2) && ((" + std::to_string(s_parameters[2]) + " <= z) && (z <=" + std::to_string(s_parameters[2] + s_parameters[5]) + "))";
+        }
+    }
+    void setOuterBoundary() {
+        if (s_type == "so") {
+            o_boundary = "pow(x, 2) + pow(y, 2) + pow(z, 2) > pow(" + std::to_string(s_parameters[0]) + ",2)";
+        }
+        else if (s_type == "cu") {
+            // 여기서는 cy 타입에 대한 경계조건을 문자열로 설정합니다.
+            // 예시에 따라, cy는 6개의 파라미터를 가진다고 가정합니다.
+            o_boundary = "((x < " + std::to_string(s_parameters[0]) + ") || (x > " + std::to_string(s_parameters[1]) + ")) && (( y < "
+                       + std::to_string(s_parameters[2]) + ") || (x > " + std::to_string(s_parameters[3]) + ")) && (( z < "
+                       + std::to_string(s_parameters[4]) + ") || (z > " + std::to_string(s_parameters[5]) + "))";
+        }
+        else if (s_type == "cy"){
+            o_boundary =  "pow(" + std::to_string(s_parameters[0]) + "- x, 2) + pow(" + std::to_string(s_parameters[1]) + "- y, 2) > pow("
+                        + std::to_string(s_parameters[6]) + ", 2) || (z < " + std::to_string(s_parameters[2]) + ") || (z > " + std::to_string(s_parameters[2] + s_parameters[5]) + ")";
+        }
+    }
+    std::string getInnerBoundary() const {
+        return i_boundary;
+    }
+    std::string getOuterBoundary() const {
+        return o_boundary;
+    }
+};
+
+std::vector<Surface> readSurfaceCards(const std::string& filePath) {
+    std::ifstream file(filePath);
+    std::string line;
+    std::vector<Surface> surfaces;
+    bool readingSurfaceCards = false;
+
+    while (getline(file, line)) {
+        if (line.find("surface card") != std::string::npos) {
+            readingSurfaceCards = true;
+        }
+        if (line.find("end surface card") != std::string::npos) break; // "end surface card" = 읽기를 중단.
+
+        if (readingSurfaceCards) {
+            std::istringstream iss(line);
+            int num;
+            std::string type;
+            std::vector<double> params;
+            double param;
+
+            iss >> num >> type;
+            while (iss >> param) {
+                params.push_back(param); // 파라미터를 벡터에 추가.
+            }
+            surfaces.emplace_back(Surface(num, type, params));
+        }
+    }
+    return surfaces;
+}
+class Material {
+public:
+    int m_number;
+    double m_density;
+    std::vector<std::pair<int, double>> composition; // 원소 번호와 weight percent
+    double totalMass = 0.0;
+    std::vector<double> numberDensities; // 원소별 number density
+
+    Material(int num, double dens) : m_number(num), m_density(dens) {}
+
+    void addElement(int atomicNumber, double weightPercent) {
+        composition.push_back({atomicNumber, weightPercent});
+    }
+    void calculateTotalMass() {
+        for (auto& element : composition) {
+            int massNumber = element.first % 1000; // 원자 번호에서 질량 수를 추출
+            double weight = element.second;
+            totalMass += massNumber * (weight / 100.0);
+        }
+    }
+    void calculateNumberDensities() {  // 위의 total mass를 통해 원소별 수밀도 계산
+        const double NA = 6.02e23; // 아보가드로 수
+        for (auto& element : composition) {
+            int massNumber = element.first % 1000;
+            double weightPercent = element.second;
+            double nd = (weightPercent / 100.0) * m_density * NA / totalMass;
+            numberDensities.push_back(nd);
+        }
+    }
+};
+std::vector<Material> readMaterialCards(const std::string& filePath) {
+    std::ifstream file(filePath);
+    std::string line;
+    std::vector<Material> materials;
+    bool readingMaterialCards = false;
+
+    while (getline(file, line)) {
+        if (line.find("material card") != std::string::npos) {
+            readingMaterialCards = true;
+            // continue;
+        }
+        if (line.find("end material card") != std::string::npos) break;
+
+        if (readingMaterialCards) {
+            std::istringstream iss(line);
+            int num;
+            double density;
+            iss >> num >> density;
+            Material material(num, density);
+
+            int atomicNumber;
+            double weightPercent;
+            while (iss >> atomicNumber >> weightPercent) {
+                material.addElement(atomicNumber, weightPercent);
+            }
+            material.calculateTotalMass();
+            material.calculateNumberDensities();
+            materials.push_back(material);
+        }
+    }
+    return materials;
+}
+class CellCard {
+public:
+    int cellNumber;
+    int c_materialNumber;
+    std::vector<std::pair<int, bool>> c_surfaces; // <surface number, inside (true) or outside (false)>
+
+    CellCard(int cellNum, int matNum) : cellNumber(cellNum), c_materialNumber(matNum) {}
+
+    void addSurface(int surfaceNumber, bool inside) {
+        c_surfaces.emplace_back(surfaceNumber, inside);
+    }
+};
+std::vector<CellCard> readCellCards(const std::string& filePath) {
+    std::vector<CellCard> cellCards;
+    std::ifstream file(filePath);
+    std::string line;
+    bool readingCellCards = false;
+    while (getline(file, line)) {
+        if (line.find("cell card") != std::string::npos) {
+            readingCellCards = true;
+            // continue;
+        }
+        if (line.find ("end cell card") != std::string::npos) {
+            break;
+        }
+
+        if (readingCellCards) {
+            std::istringstream iss(line);
+            int cellNum, matNum, surfaceNum;
+            iss >> cellNum >> matNum;
+            CellCard cellCard(cellNum, matNum);
+
+            while (iss >> surfaceNum) {
+                bool inside = surfaceNum > 0;
+                cellCard.addSurface(abs(surfaceNum), inside);
+            }
+            cellCards.push_back(cellCard);
+        }
+    }
+    return cellCards;
+}
+class Calculation {
+public:
+    std::vector<int> kcode; // kcode 정보를 저장할 벡터 (예: [3000, 60, 150])
+    std::vector<float> ksrc; // ksrc 정보를 저장할 벡터 (예: [0, 0, 0])
+
+    // kcode 정보를 파싱하여 저장하는 함수
+    void parseKcode(const std::string& line) {
+        std::istringstream iss(line);
+        int value;
+        while (iss >> value) {
+            kcode.push_back(value);
+        }
+    }
+
+    // ksrc 정보를 파싱하여 저장하는 함수
+    void parseKsrc(const std::string& line) {
+        std::istringstream iss(line);
+        float value;
+        while (iss >> value) {
+            ksrc.push_back(value);
+        }
+    }
+};
+// 파일에서 "calculation card" 정보를 읽는 함수
+void readCalculationCards(const std::string& filePath, Calculation& calculation) {
+    std::ifstream file(filePath);
+    std::string line;
+
+    while (getline(file, line)) {
+        if (line.find("kcode") != std::string::npos) {
+            calculation.parseKcode(line.substr(line.find("kcode") + 6));
+        } else if (line.find("ksource") != std::string::npos) {
+            calculation.parseKsrc(line.substr(line.find("ksource") + 7));
+        }
+    }
+}
+
+int main() {
+    clock_t start, finish;
+    double duration;
+    start = clock();
+    std::string filePath = "D:/input/code_develop/mcsg_inputs/mcsg_test.txt"; // 파일 경로 수정 필요
+    auto surfaces = readSurfaceCards(filePath);
+    auto materials = readMaterialCards(filePath);
+    auto cellCards = readCellCards(filePath);
+    Calculation calculation;
+    readCalculationCards(filePath, calculation);
+    nps = calculation.kcode[0], skipped_cycle = calculation.kcode[1], cycle = calculation.kcode[2], incident_erg=1.0;
+    x = calculation.ksrc[0], y = calculation.ksrc[1], z=calculation.ksrc[2];
+
+    bool found = false;
+    for (const auto& surface : surfaces) {
+        if (surface.s_number == 1) {
+            std::cout << "Boundary for surface " << surface.s_number << ": " << surface.getInnerBoundary() << std::endl;
+            std::cout << "Boundary for surface " << surface.s_number << ": " << surface.getOuterBoundary() << std::endl;
+            found = true;
+            break;
+        }
+    }
+    for (const auto& cellCard : cellCards) {
+        if (cellCard.cellNumber == 11) { // 10번 cell 찾기
+            std::cout << "Cell Number: " << cellCard.cellNumber << std::endl;
+            std::cout << "Material Number: " << cellCard.c_materialNumber << std::endl;
+            std::cout << "Surfaces: ";
+            for (const auto& surface : cellCard.c_surfaces) {
+                std::cout << "(" << surface.first << ", " << (surface.second ? "inside" : "outside") << ") ";
+            }
+            std::cout << std::endl;
+            break; // 10번 cell을 찾으면 반복 중단
+        }
+    }
+
+    finish = clock(), duration = (double)(finish - start) / CLOCKS_PER_SEC;
+    std::cout << "Computing Time : " << duration << "sec" << std::endl;
+    return 0;
+}
+void XI_GEN() {
+    double vari;
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> dis(1, 9999);
+    vari = dis(gen);
+    xi = vari / 10000;
+}
+void ANGLE_GEN() {
+    XI_GEN();
+    theta = acos(2 * xi - 1);
+    theta = theta * 180 / pi;
+    XI_GEN();
+    phi = 2 * pi * xi;
+    phi = phi * 180 / pi;
+
+    cos_theta = cos(theta);
+    sin_theta = sin(theta);
+    cos_phi = cos(phi);
+    sin_phi = sin(phi);
+}
+void FISSION_NEUTRON_NUM() {
+    XI_GEN();
+    if (xi < 0.55) FN_num = 2;
+    else FN_num = 3;
+}
+void N_ENERGY_GEN() {
+    double vari1;
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> dis(1, 1000000);
+    vari1 = dis(gen);
+    n_energy = vari1 / 100000;
+}
+void NEUTRON_SPECTRA() {
+    double p_max = 0.35745, reaction1, p_n_energy;
+    while (true) {
+        XI_GEN(), N_ENERGY_GEN();
+        p_n_energy = 0.4865 * sinh((sqrt(2 * n_energy)) * exp(-1 * n_energy));
+        reaction1 = p_n_energy / p_max;
+        if (reaction1 >= xi) {
+            incident_erg = n_energy*1000000;
+            break;
+        }
+    }
+}
