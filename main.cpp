@@ -1,414 +1,579 @@
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <iostream>
-#include <string>
-#include <random>
-#include <ctime>
-#include <cmath>
-#include <algorithm>
-
-double xi, x, y, z, r = 0.0, FN_num, n_energy, scat = 0.0, cap = 0.0, fis = 0.0, n2n = 0.0, scat_fraction, fis_fraction, n2n_fraction;
-double tmp_erg, incident_erg, theta, phi, cos_theta, sin_theta, cos_phi, sin_phi, nps, mass_num;
-const double pi = 3.1415827;
-int cycle = 0, skipped_cycle = 0, cycle_alarm = 0, area_out = 0, N_cnt = 0;
+#include<iostream>
+#include<fstream>
+#include<cmath>
+#include<random>
+#include<ctime>
+#include<string>
+using namespace std;
+std::mt19937& get_rng() {
+    static std::random_device rd; // 시드 생성기
+    static std::mt19937 rng(rd()); // 난수 생성기
+    return rng;
+}
+double generate_random() {
+    static std::uniform_real_distribution<> dis(0.0, 1.0); // 0과 1 사이의 실수 난수 생성
+    return dis(get_rng());
+}
+double SEED[100000000] = {1, }, g = 9219741426499971445, c=1, p=pow(2, 63), modulus_tmp;
+double RN[100000000] = {0, };
+double U235cap[75960][2], U235scat[75960][2], U235fi[75960][2], U235n2n[59][2], U235inscat[425][0];
+double U238cap[156980][2], U238scat[156980][2], U238fi[156980][2], U238n2n[107][2], U238inscat[415][0];
+double U234cap[25320][2], U234scat[25320][2], U234fi[25320][2], U234n2n[171][2], U234inscat[488][0];
+double xi, x, y, z, r = 0.0, FN_num, N_cnt = 0, n_energy, scat, cap, fis, scat_fraction, fis_fraction, n2n_fraction, n2n, inscat;
+double tmp_erg, incident_erg, theta, phi, cos_theta, sin_theta, cos_phi, sin_phi, nps;
+double pi = 3.1415827, atom_num = 235.1479, boundary = 76.405081;
+double std_dev;
 double fis_point[1000000][4] = {0, }, fis_point_tmp[1000000][4] = {0, }, n2n_point[1000000][5]={0,}, n2n_point_tmp[1000000][5]={0, },
         fission_neutron_per_cycle[1000] = {0, }, n2n_neutron_per_cycle[1000]={0, }, keff[1000]={0, }, k_sum = 0;
-void XI_GEN(), ANGLE_GEN(), FISSION_NEUTRON_NUM(), N_ENERGY_GEN(), NEUTRON_SPECTRA();
-
-class Surface {
-public:
-    int s_number;
-    std::string s_type;
-    std::vector<double> s_parameters; // 다양한 파라미터를 저장하기 위한 벡터
-
-    // 생성자는 surface 번호, 타입(원, 원기둥, 직육면체..)과, 그리고 파라미터(반지름, 높이 ..)들을 받음.
-    Surface(int num, const std::string& typ, const std::vector<double>& params)
-            : s_number(num), s_type(typ), s_parameters(params) {}
-    bool isInside(double x, double y, double z) const {
-        if (s_type == "so") { // 구
-            double radius = s_parameters[0];
-            return x*x + y*y + z*z < radius*radius;
-        } else if (s_type == "cy") { // 원기둥
-            // 원기둥 중심 (cx, cy), 반지름 radius, 높이 h
-            double cx = s_parameters[0], cy = s_parameters[1];
-            double radius = s_parameters[6], h_vec = s_parameters[5];
-            double dx = x - cx, dy = y - cy;
-            return dx*dx + dy*dy < radius*radius && z >= 0 && z <= s_parameters[2]+h_vec; // 예시 조건, 구체적인 구현은 문제에 따라 달라질 수 있음
-        } else if (s_type == "cu") { // 입방체
-            // 입방체의 각 축별 최소값(minx, miny, minz)과 최대값(maxx, maxy, maxz)
-            double minx = s_parameters[0], maxx = s_parameters[1];
-            double miny = s_parameters[2], maxy = s_parameters[3];
-            double minz = s_parameters[4], maxz = s_parameters[5];
-            return x >= minx && x <= maxx && y >= miny && y <= maxy && z >= minz && z <= maxz;
-        }
-        // 다른 표면 유형에 대한 조건 추가 가능
-        return false;
-    }
-};
-std::vector<Surface> readSurfaceCards(const std::string& filePath) {
-    std::ifstream file(filePath);
-    std::string line;
-    std::vector<Surface> surfaces;
-    bool readingSurfaceCards = false;
-
-    while (getline(file, line)) {
-        if (line.find("surface card") != std::string::npos) {
-            readingSurfaceCards = true;
-            continue;
-        }
-        if (line.find("end surface card") != std::string::npos) break; // "end surface card" = 읽기를 중단.
-
-        if (readingSurfaceCards) {
-            std::istringstream iss(line);
-            int num;
-            std::string type;
-            std::vector<double> params;
-            double param;
-
-            iss >> num >> type;
-            while (iss >> param) {
-                params.push_back(param); // 파라미터를 벡터에 추가.
-            }
-            surfaces.emplace_back(Surface(num, type, params));
-        }
-    }
-    return surfaces;
-}
-class Material {
-public:
-    int m_number;
-    double m_density;
-    std::vector<std::pair<int, double>> composition; // 원소 번호와 weight percent
-    double totalMass = 0.0;
-    std::vector<double> numberDensities; // 원소별 number density
-
-    Material(int num, double dens) : m_number(num), m_density(dens) {}
-
-    void addElement(int atomicNumber, double weightPercent) {
-        composition.push_back({atomicNumber, weightPercent});
-    }
-    void calculateTotalMass() {
-        for (auto& element : composition) {
-            int massNumber = element.first % 1000; // 원자 번호에서 질량 수를 추출
-            double weight = element.second;
-            totalMass += massNumber * (weight / 100.0);
-        }
-    }
-    void calculateNumberDensities() {  // 위의 total mass를 통해 원소별 수밀도 계산
-        const double NA = 6.02e23; // 아보가드로 수
-        for (auto& element : composition) {
-            int massNumber = element.first % 1000;
-            double weightPercent = element.second;
-            double nd = (weightPercent / 100.0) * m_density * NA / totalMass * 1e-24;
-            numberDensities.push_back(nd);
-        }
-    }
-    void calculateXsAndStore(double incidentEnergy);
-};
-std::vector<Material> readMaterialCards(const std::string& filePath) {
-    std::ifstream file(filePath);
-    std::string line;
-    std::vector<Material> materials;
-    bool readingMaterialCards = false;
-
-    while (getline(file, line)) {
-        if (line.find("material card") != std::string::npos) {
-            readingMaterialCards = true;
-            // continue;
-        }
-        if (line.find("end material card") != std::string::npos) break;
-
-        if (readingMaterialCards) {
-            std::istringstream iss(line);
-            int num;
-            double density;
-            iss >> num >> density;
-            Material material(num, density);
-
-            int atomicNumber;
-            double weightPercent;
-            while (iss >> atomicNumber >> weightPercent) {
-                material.addElement(atomicNumber, weightPercent);
-            }
-            material.calculateTotalMass();
-            material.calculateNumberDensities();
-            materials.push_back(material);
-        }
-    }
-    return materials;
-}
-
-class CellCard {
-public:
-    int cellNumber;
-    int c_materialNumber;
-    std::vector<int> c_surfaces;
-    bool isFinalBoundary = false;
-    int finalBoundarySurface = -1;
-
-    CellCard(int cellNum, int matNum) : cellNumber(cellNum), c_materialNumber(matNum) {}
-
-    void addSurface(int surfaceNumber) {
-        if (surfaceNumber == 0) {
-            isFinalBoundary = true;
-        } else if (isFinalBoundary) {
-            finalBoundarySurface = surfaceNumber;
-        } else {
-            c_surfaces.push_back(surfaceNumber);
-        }
-    }
-
-    bool isPointInCell(double x, double y, double z, const std::vector<Surface>& surfaces) const {
-        for (int surfaceNum : c_surfaces) {
-            bool shouldBeInside = surfaceNum < 0;
-            surfaceNum = std::abs(surfaceNum);
-
-            const auto& surface = *std::find_if(surfaces.begin(), surfaces.end(),
-                                                [surfaceNum](const Surface& s) { return s.s_number == surfaceNum; });
-            if (surface.isInside(x, y, z) != shouldBeInside) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool isPointOutsideFinalBoundary(double x, double y, double z, const std::vector<Surface>& surfaces) const {
-        if (finalBoundarySurface == -1) return false;
-
-        const auto& surface = *std::find_if(surfaces.begin(), surfaces.end(),
-                                            [this](const Surface& s) { return s.s_number == finalBoundarySurface; });
-
-        return !surface.isInside(x, y, z);
-    }
-};
-std::vector<CellCard> readCellCards(const std::string& filePath) {
-    std::vector<CellCard> cellCards;
-    std::ifstream file(filePath);
-    std::string line;
-    bool readingCellCards = false;
-    while (getline(file, line)) {
-        if (line.find("cell card") != std::string::npos) {
-            readingCellCards = true;
-            continue;
-        }
-        if (line.find("end cell card") != std::string::npos) break;
-
-        if (readingCellCards) {
-            std::istringstream iss(line);
-            int cellNum, matNum, surfaceNum;
-            iss >> cellNum >> matNum;
-            CellCard cellCard(cellNum, matNum);
-
-            while (iss >> surfaceNum) {
-                cellCard.addSurface(surfaceNum);
-            }
-            cellCards.push_back(cellCard);
-        }
-    }
-    return cellCards;
-}
-int detectCellForPoint(double x, double y, double z, const std::vector<CellCard>& cellCards, const std::vector<Surface>& surfaces) {
-    for (const auto& cell : cellCards) {
-        if (cell.isPointInCell(x, y, z, surfaces)) {
-            return cell.cellNumber;
-        }
-    }
-
-    for (const auto& cell : cellCards) {
-        if (cell.isFinalBoundary && cell.isPointOutsideFinalBoundary(x, y, z, surfaces)) {
-            return cell.cellNumber;
-        }
-    }
-
-    return 0;
-}
-
-class Calculation {
-public:
-    std::vector<int> kcode; // kcode 정보를 저장할 벡터 (예: [3000, 60, 150])
-    std::vector<float> ksrc; // ksrc 정보를 저장할 벡터 (예: [0, 0, 0])
-
-    // kcode 정보를 파싱하여 저장하는 함수
-    void parseKcode(const std::string& line) {
-        std::istringstream iss(line);
-        int value;
-        while (iss >> value) {
-            kcode.push_back(value);
-        }
-    }
-
-    // ksrc 정보를 파싱하여 저장하는 함수
-    void parseKsrc(const std::string& line) {
-        std::istringstream iss(line);
-        float value;
-        while (iss >> value) {
-            ksrc.push_back(value);
-        }
-    }
-};
-// 파일에서 "calculation card" 정보를 읽는 함수
-void readCalculationCards(const std::string& filePath, Calculation& calculation) {
-    std::ifstream file(filePath);
-    std::string line;
-
-    while (getline(file, line)) {
-        if (line.find("kcode") != std::string::npos) {
-            calculation.parseKcode(line.substr(line.find("kcode") + 6));
-        } else if (line.find("ksource") != std::string::npos) {
-            calculation.parseKsrc(line.substr(line.find("ksource") + 7));
-        }
-    }
-}
-void printMaterialInfo(int cellNumber, const std::vector<CellCard>& cellCards, const std::vector<Material>& materials) {
-    // cellNumber에 해당하는 CellCard 찾기
-    auto cellIt = std::find_if(cellCards.begin(), cellCards.end(),
-                               [cellNumber](const CellCard& cell) { return cell.cellNumber == cellNumber; });
-
-    if (cellIt == cellCards.end()) {
-        std::cout << "Cell " << cellNumber << " not found." << std::endl;
-        return;
-    }
-
-    // CellCard에서 물질 번호 찾기
-    int materialNumber = cellIt->c_materialNumber;
-
-    // 해당 물질 번호에 해당하는 Material 찾기
-    auto materialIt = std::find_if(materials.begin(), materials.end(),
-                                   [materialNumber](const Material& material) { return material.m_number == materialNumber; });
-
-    if (materialIt == materials.end()) {
-        std::cout << "Material for cell " << cellNumber << " not found." << std::endl;
-        return;
-    }
-
-    // Material 정보 출력
-    const Material& material = *materialIt;
-    std::cout << "Material Number: " << material.m_number << std::endl;
-    std::cout << "Density: " << material.m_density << " g/cm^3" << std::endl;
-    std::cout << "Total Mass: " << material.totalMass << std::endl;
-    std::cout << "Number Densities: ";
-    for (double nd : material.numberDensities) {
-        std::cout << nd << " ";
-    }
-    std::cout << std::endl;
-}
-// Material 정보를 가져와 저장하는 구조체 정의
-struct MaterialInfo {
-    double totalMass;
-    std::vector<double> numberDensities;
-};
-
-// Material 정보를 가져오는 함수
-MaterialInfo getMaterialInfo(int cellNumber, const std::vector<CellCard>& cellCards, const std::vector<Material>& materials) {
-    MaterialInfo materialInfo = {0.0, {}};
-
-    auto cellIt = std::find_if(cellCards.begin(), cellCards.end(),
-                               [cellNumber](const CellCard& cell) { return cell.cellNumber == cellNumber; });
-    if (cellIt != cellCards.end()) {
-        int materialNumber = cellIt->c_materialNumber;
-        std::cout << "Looking for Material Number: " << materialNumber << std::endl;
-
-        auto materialIt = std::find_if(materials.begin(), materials.end(),
-                                       [materialNumber](const Material& material) { return material.m_number == materialNumber; });
-        if (materialIt != materials.end()) {
-            std::cout << "Found Material. Number: " << materialIt->m_number << ", Total Mass: " << materialIt->totalMass << std::endl;
-            materialInfo.totalMass = materialIt->totalMass;
-            materialInfo.numberDensities = materialIt->numberDensities;
-        } else {
-            std::cout << "Material Number " << materialNumber << " not found in materials list." << std::endl;
-        }
-    } else {
-        std::cout << "Cell Number " << cellNumber << " not found in cell cards." << std::endl;
-    }
-
-    return materialInfo;
-}
-
-double linearInterpolation(double x0, double y0, double x1, double y1, double x) {
-    return y0 + (x - x0) * (y1 - y0) / (x1 - x0);
-}
-double readXsValue(const std::string& filename, double incidentEnergy) {
-    std::ifstream file(filename);
-    double energy, xs, prevEnergy, prevXs;
-    bool first = true;
-
-    if (file.is_open()) {
-        while (file >> energy >> xs) {
-            if (energy == incidentEnergy) {
-                return xs; // 정확한 값이 파일에 있을 경우
-            } else if (energy > incidentEnergy) {
-                if (first) return xs; // 에너지가 범위를 벗어난 경우 첫 번째 XS 값 반환
-                return linearInterpolation(prevEnergy, prevXs, energy, xs, incidentEnergy); // 선형 보간
-            }
-            prevEnergy = energy;
-            prevXs = xs;
-            first = false;
-        }
-    }
-    return 0.0; // 파일이 없거나 에너지가 범위를 벗어난 경우
-}
-void Material::calculateXsAndStore(double incidentEnergy) {
-    std::vector<std::string> reactions = {"capture", "fission", "scattering"};
-    std::string base_path = "D:/input/XS/ENDF71/"; // XS 파일이 있는 디렉토리 경로
-    for (const auto& comp : composition) {
-        std::string isotop = std::to_string(comp.first); // 동위원소 번호
-        double weightPercent = comp.second; // 해당 동위원소의 weight percent
-        double numberDensity = (weightPercent/100) * m_density * 6.02e+23 / totalMass * 1e-24; // number density 계산
-
-        for (const auto& reaction : reactions) {
-            std::string filename = base_path + isotop + "_" + reaction + ".txt";
-            double xsValue = readXsValue(filename, incidentEnergy);
-
-            // 계산하여 전역 변수에 저장
-            if (reaction == "capture") {
-                cap += xsValue * numberDensity;
-            } else if (reaction == "fission") {
-                fis += xsValue * numberDensity;
-            } else if (reaction == "scattering") {
-                scat += xsValue * numberDensity;
-            }
-        }
-    }
-}
-void calculateAndStoreXS(std::vector<Material>& materials, double incidentEnergy) {
-    // 결과 초기화
-    cap = fis = scat = 0.0;
-
-    for (auto& material : materials) {
-        material.calculateXsAndStore(incidentEnergy);
-    }
-}
-
+int cycle, skipped, cycle_alarm = 0, area_out = 0, collision = 0, std_fis = 0, std_nps = 0;
+double x_bar = 0, x_bar_2 = 0, active_sum = 0, active_sum_2 = 0;
+double st_dv[1000] = {0, };
+string file_path("D:/input/XS/GODIVA_FINAL/");
+// string file_path("/Users/geun/CLionProjects/GODIVA_231031/");
+void XI_GEN(), ANGLE_GEN(), FISSION_NEUTRON_NUM(), LCG();
+double N_ENERGY_GEN(), P_N_ENERGY();
+vector<double> FISSION_ENERGY(int num_simulations);
+// void U234_capture(), U235_capture(), U238_capture(), U234_scattering(), U235_scattering(), U238_scattering(), U234_fission(), U235_fission(), U238_fission(), XS_READER(), U234_inelastic(), U235_inelastic(), U238_inelastic();
+void U235_capture(), U238_capture(), U235_scattering(), U238_scattering(), U235_fission(), U238_fission(), XS_READER(), U234_capture(), U234_scattering(), U234_fission(), U234_n2n(), U235_n2n(), U238_n2n(), U234_inelastic(), U235_inelastic(), U238_inelastic();
 int main() {
-    int fis_cnt = 0, fis_cnt_tmp = 0, cap_cnt = 0, cap_cnt_tmp = 0, n2n_cnt = 0, n2n_cnt_tmp = 0;
     clock_t start, finish;
     double duration;
     start = clock();
-    std::string filePath = "D:/input/code_develop/mcsg_inputs/test0319.txt"; // 파일 경로 수정 필요
-    auto surfaces = readSurfaceCards(filePath);
-    auto materials = readMaterialCards(filePath);
-    auto cellCards = readCellCards(filePath);
-    Calculation calculation;
-    readCalculationCards(filePath, calculation);
-    nps = calculation.kcode[0], skipped_cycle = calculation.kcode[1], cycle = calculation.kcode[2], incident_erg=1.0;
-    // x = calculation.ksrc[0], y = calculation.ksrc[1], z=calculation.ksrc[2];
-    x = 8.742, y = 0, z = 0;
-    int cellNum = detectCellForPoint(x, y, z, cellCards, surfaces);
-    std::cout << cellNum << std::endl;
+    int fis_cnt = 0, fis_cnt_tmp = 0, cap_cnt = 0, cap_cnt_tmp = 0, n2n_cnt = 0, n2n_cnt_tmp = 0, total_fission = 0;
+    U235_capture(), U238_capture(), U235_scattering(), U238_scattering(), U235_fission(), U238_fission(), U234_capture(), U234_scattering(), U234_fission(), U234_n2n(), U235_n2n(), U238_n2n(), U234_inelastic(), U235_inelastic(), U238_inelastic();
+    // U234_capture(), U235_capture(), U238_capture(), U234_scattering(), U235_scattering(), U238_scattering(), U234_fission(), U235_fission(), U238_fission(), U234_inelastic(), U235_inelastic(), U238_inelastic();
+    cout << "Enter the number of Cycles : ";
+    cin >> cycle;
+    cout << "Enter the number of Skipped Cycle : ";
+    cin >> skipped;
+    cout << "Enter the Number of Neutrons per Generation : ";
+    cin >> nps;
+    cout << "Enter the Initial Incident Energy (MeV) : ";
+    cin >> tmp_erg;
+    cout << "Importing U234 ENDF7.1 Cross-section ..." << endl;
+    cout << "Importing U235 ENDF7.1 Cross-section ..." << endl;
+    cout << "Importing U238 ENDF7.1 Cross-section ..." << endl;
 
+    total_fission = int(nps)*cycle;
+    vector<double> fission_energy = FISSION_ENERGY(total_fission);
+    int fission_energy_count = 0;
 
+    LCG();
+
+    for(int i = 0; i < nps; i++){
+        incident_erg = tmp_erg * 1000000;
+        XS_READER();
+        // cout << scat << " " << cap << " " << fis << " " << n2n << endl;
+        scat_fraction = scat / (scat + cap + fis + n2n), n2n_fraction = (scat + n2n)/(scat + cap + fis + n2n), fis_fraction = (scat + n2n + fis) / (scat + cap + fis + n2n);
+        // cout << scat_fraction << " " << n2n_fraction << " " << fis_fraction << endl;
+        XI_GEN();
+        x = 0.0, y = 0.0, z = 0.0;
+        if(xi <= scat_fraction){ // scattering...
+            ANGLE_GEN();
+            XI_GEN();
+            r = -1 * log(xi) / (scat + cap + fis + n2n + inscat);
+            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+            if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                area_out++;
+                // cout << x << " " << y << " " << z << endl;
+                continue;
+            }
+            incident_erg *= atom_num / (atom_num + 1);
+            collision++;
+            while(true){
+                XS_READER();
+                scat_fraction = scat / (scat + cap + fis + n2n), n2n_fraction = (scat + n2n)/(scat + cap + fis + n2n), fis_fraction = (scat + fis + n2n) / (scat + cap + fis + n2n);
+                XI_GEN();
+                if(xi >= fis_fraction) { //capture
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (scat + cap + fis + n2n + inscat);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                        cap_cnt++, cap_cnt_tmp++;
+                        collision++;
+                    }
+                    else{
+                        area_out++;
+                    }
+                    break;
+                }
+                else if(xi >= n2n_fraction){ // fission
+                    collision++;
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (cap + scat + fis + n2n + inscat);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                        FISSION_NEUTRON_NUM();
+                        // cout << N_cnt << endl;
+                        N_cnt += FN_num;
+                        fis_cnt++, fis_cnt_tmp++;
+                        fis_point[fis_cnt - 1][0] = fis_cnt_tmp;
+                        fis_point[fis_cnt - 1][1] = x;
+                        fis_point[fis_cnt - 1][2] = y;
+                        fis_point[fis_cnt - 1][3] = z;
+                    }
+                    else{
+                        area_out++;
+                    }
+                    break;
+                }
+                else if(xi >= scat_fraction){ // n2n reaction
+                    collision++;
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (cap + scat + fis + n2n + inscat);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                        n2n_cnt++, n2n_cnt_tmp++;
+                        n2n_point[n2n_cnt - 1][0] = n2n_cnt_tmp;
+                        n2n_point[n2n_cnt - 1][1] = x;
+                        n2n_point[n2n_cnt - 1][2] = y;
+                        n2n_point[n2n_cnt - 1][3] = z;
+                        n2n_point[n2n_cnt - 1][4] = incident_erg;
+                    }
+                    else{
+                        area_out++;
+                    }
+                    break;
+                }
+                else{ // scattering ... while other reaction occur
+                    collision++;
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (scat + cap + fis + n2n + inscat);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                        incident_erg *= atom_num / (atom_num + 1);
+                    }
+                    else {
+                        area_out++;
+                        break;
+                    }
+                }
+            }
+        }
+        else if(xi <= n2n_fraction){ // n2n reaction
+            ANGLE_GEN();
+            XI_GEN();
+            r = -1 * log(xi) / (cap + scat + fis + n2n);
+            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+            if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                area_out++;
+                continue;
+            }
+            n2n_cnt++, n2n_cnt_tmp++;
+            n2n_point[n2n_cnt - 1][0] = n2n_cnt_tmp;
+            n2n_point[n2n_cnt - 1][1] = x;
+            n2n_point[n2n_cnt - 1][2] = y;
+            n2n_point[n2n_cnt - 1][3] = z;
+            n2n_point[n2n_cnt - 1][4] = incident_erg;
+        }
+        else if(xi <= fis_fraction){ // fission
+            ANGLE_GEN();
+            XI_GEN();
+            r = -1 * log(xi) / (cap + scat + fis + n2n);
+            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+            if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                area_out++;
+                continue;
+            }
+            FISSION_NEUTRON_NUM();
+            N_cnt += FN_num;
+            fis_cnt++, fis_cnt_tmp++, std_fis++;
+            fis_point[fis_cnt - 1][0] = fis_cnt_tmp;
+            fis_point[fis_cnt - 1][1] = x;
+            fis_point[fis_cnt - 1][2] = y;
+            fis_point[fis_cnt - 1][3] = z;
+        }
+        else{  // capture
+            ANGLE_GEN();
+            XI_GEN();
+            r = -1 * log(xi) / (cap + scat +fis + n2n);
+            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+            if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                area_out++;
+                continue;
+            }
+            cap_cnt++, cap_cnt_tmp++;
+        }
+    }
+
+    fission_neutron_per_cycle[cycle_alarm] = fis_cnt_tmp;
+    n2n_neutron_per_cycle[cycle_alarm] = n2n_cnt_tmp;
+    fis_cnt_tmp = 0, fis_cnt = 0, cycle_alarm = 1;
+    n2n_cnt_tmp = 0, n2n_cnt = 0;
+    for (int i = 0; i < 1000000; i++) {
+        for (int j = 0; j < 4; j++) {
+            fis_point_tmp[i][j] = fis_point[i][j];
+            n2n_point_tmp[i][j] = n2n_point[i][j];
+        }
+    }
+    for (int i = 0; i < 1000000; i++) {
+        for (int j = 0; j < 4; j++) {
+            fis_point[i][j] = 0;
+            n2n_point[i][j] = 0;
+        }
+    }
+    cout << "fission count : " <<fission_neutron_per_cycle[0] << " capture count : " << cap_cnt << "  godiva area out : " << area_out << "      n2n : " << n2n_neutron_per_cycle[0] << endl;
+    cout << fixed;
+    cout.precision(5);
+    cout << "1 cycle k-effective value : " << N_cnt/nps << endl;
+    // cout << n2n_neutron_per_cycle[0] << endl;
+    keff[0] = N_cnt/nps;
+
+    cap_cnt = 0, area_out = 0;
+    N_cnt =0;
+
+    for(int i = 1; i < cycle; i++){
+        int fis_idx = 0, n2n_idx = 0;
+        for(int j = 0; j < nps; j++){
+            incident_erg = fission_energy[fission_energy_count] * 1000000;
+            fission_energy_count++;
+            // cout << incident_erg << endl;
+            XS_READER();
+            // cout << "Energy : " << incident_erg <<"XS : " << scat << " " << cap << " " << fis << " " << n2n << endl;
+            scat_fraction = scat / (scat + cap + fis + n2n), n2n_fraction = (scat + n2n)/(scat + cap + fis + n2n), fis_fraction = (scat + n2n + fis) / (scat + cap + fis + n2n);
+            // cout << scat_fraction << " " << n2n_fraction << " " << fis_fraction << endl;
+            XI_GEN();
+            // cout << xi << endl;
+            x = fis_point_tmp[fis_idx][1], y = fis_point_tmp[fis_idx][2], z = fis_point_tmp[fis_idx][3];
+            fis_idx++;
+            if(fis_idx>=fission_neutron_per_cycle[i-1]){
+                fis_idx = 0;
+            }
+            if(xi <= scat_fraction){ // scattering ...
+                ANGLE_GEN();
+                // cout << cos_theta << " " << cos_phi << " " << sin_theta << " " << sin_phi << endl;
+                XI_GEN();
+                r = -1 * log(xi) / (scat + cap + fis + n2n);
+                x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                    area_out++;
+                    continue;
+                }
+                incident_erg *= atom_num / (atom_num + 1);
+                collision++;
+                while(true){
+                    XS_READER();
+                    scat_fraction = scat / (scat + cap + fis + n2n), n2n_fraction = (scat + n2n)/(scat + cap + fis + n2n), fis_fraction = (scat + n2n + fis) / (scat + cap + fis + n2n);
+                    XI_GEN();
+                    if(xi >= fis_fraction) { //capture
+                        ANGLE_GEN();
+                        XI_GEN();
+                        r = -1 * log(xi) / (scat + cap + fis + n2n);
+                        x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                        if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                            cap_cnt++, cap_cnt_tmp++;
+                            collision++;
+                        }
+                        else{
+                            area_out++;
+                        }
+                        break;
+                    }
+                    else if(xi >= n2n_fraction){ // fission
+                        collision++;
+                        ANGLE_GEN();
+                        XI_GEN();
+                        r = -1 * log(xi) / (cap + scat + fis + n2n);
+                        x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                        if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                            FISSION_NEUTRON_NUM();
+                            N_cnt += FN_num;
+                            fis_cnt++, fis_cnt_tmp++, std_fis++;
+                            fis_point[fis_cnt - 1][0] = fis_cnt_tmp;
+                            fis_point[fis_cnt - 1][1] = x;
+                            fis_point[fis_cnt - 1][2] = y;
+                            fis_point[fis_cnt - 1][3] = z;
+                        }
+                        else{
+                            area_out++;
+                        }
+                        break;
+                    }
+                    else if(xi >= scat_fraction){  // n2n reaction
+                        collision++;
+                        ANGLE_GEN();
+                        XI_GEN();
+                        r = -1 * log(xi) / (cap + scat + fis + n2n);
+                        x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                        if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                            n2n_cnt++, n2n_cnt_tmp++;
+                            n2n_point[n2n_cnt - 1][0] = n2n_cnt_tmp;
+                            n2n_point[n2n_cnt - 1][1] = x;
+                            n2n_point[n2n_cnt - 1][2] = y;
+                            n2n_point[n2n_cnt - 1][3] = z;
+                            n2n_point[n2n_cnt - 1][4] = incident_erg;
+                        }
+                        else{
+                            area_out++;
+                        }
+                        break;
+                    }
+                    else{  // scattering
+                        collision++;
+                        ANGLE_GEN();
+                        XI_GEN();
+                        r = -1 * log(xi) / (scat + cap + fis + n2n);
+                        x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                        if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                            incident_erg *= atom_num / (atom_num + 1);
+                        }
+                        else {
+                            area_out++;
+                            break;
+                        }
+                    }
+                }
+            }
+            else if(xi <= n2n_fraction){ // n2n reaction
+                ANGLE_GEN();
+                XI_GEN();
+                r = -1 * log(xi) / (cap + scat + fis + n2n);
+                x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                    area_out++;
+                    continue;
+                }
+                n2n_cnt++, n2n_cnt_tmp++;
+                n2n_point[n2n_cnt - 1][0] = n2n_cnt_tmp;
+                n2n_point[n2n_cnt - 1][1] = x;
+                n2n_point[n2n_cnt - 1][2] = y;
+                n2n_point[n2n_cnt - 1][3] = z;
+                n2n_point[n2n_cnt - 1][4] = incident_erg;
+            }
+            else if(xi <= fis_fraction){ // fission reaction
+                ANGLE_GEN();
+                XI_GEN();
+                r = -1 * log(xi) / (cap + scat + fis + n2n);
+                x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                    area_out++;
+                    continue;
+                }
+                FISSION_NEUTRON_NUM();
+                N_cnt += FN_num;
+                fis_cnt++, fis_cnt_tmp++, std_fis++;
+                fis_point[fis_cnt - 1][0] = fis_cnt_tmp;
+                fis_point[fis_cnt - 1][1] = x;
+                fis_point[fis_cnt - 1][2] = y;
+                fis_point[fis_cnt - 1][3] = z;
+            }
+            else{  // capture
+                ANGLE_GEN();
+                XI_GEN();
+                r = -1 * log(xi) / (cap + scat +fis + n2n);
+                x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                    area_out++;
+                    continue;
+                }
+                cap_cnt++, cap_cnt_tmp++;
+            }
+        }
+        for(int j = 0; j<n2n_neutron_per_cycle[i-1]; j++){  // for n2n reaction physics
+            for(int k = 0; k < 2; k++){
+                incident_erg = (n2n_point[n2n_idx][4]) * atom_num / (atom_num + 1);
+                XS_READER();
+                scat_fraction = scat / (scat + cap + fis + n2n), n2n_fraction = (scat + n2n)/(scat + cap + fis + n2n), fis_fraction = (scat + n2n + fis) / (scat + cap + fis + n2n);
+                XI_GEN();
+                x = n2n_point_tmp[n2n_idx][1], y = n2n_point_tmp[n2n_idx][2], z = n2n_point_tmp[n2n_idx][3];
+                n2n_idx++;
+                if(xi <= scat_fraction){ // scattering ...
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (scat + cap + fis + n2n);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                        area_out++;
+                        continue;
+                    }
+                    incident_erg *= atom_num / (atom_num + 1);
+                    collision++;
+                    while(true){
+                        XS_READER();
+                        scat_fraction = scat / (scat + cap + fis + n2n), n2n_fraction = (scat + n2n)/(scat + cap + fis + n2n), fis_fraction = (scat + n2n + fis) / (scat + cap + fis + n2n);
+                        XI_GEN();
+                        if(xi >= fis_fraction) { //capture
+                            ANGLE_GEN();
+                            XI_GEN();
+                            r = -1 * log(xi) / (scat + cap + fis + n2n);
+                            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                            if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                                cap_cnt++, cap_cnt_tmp++;
+                                collision++;
+                            }
+                            else{
+                                area_out++;
+                            }
+                            break;
+                        }
+                        else if(xi >= n2n_fraction){ // fission
+                            collision++;
+                            ANGLE_GEN();
+                            XI_GEN();
+                            r = -1 * log(xi) / (cap + scat + fis + n2n);
+                            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                            if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                                FISSION_NEUTRON_NUM();
+                                N_cnt += FN_num;
+                                fis_cnt++, fis_cnt_tmp++, std_fis++;
+                                fis_point[fis_cnt - 1][0] = fis_cnt_tmp;
+                                fis_point[fis_cnt - 1][1] = x;
+                                fis_point[fis_cnt - 1][2] = y;
+                                fis_point[fis_cnt - 1][3] = z;
+                            }
+                            else{
+                                area_out++;
+                            }
+                            break;
+                        }
+                        else if(xi >= scat_fraction){  // n2n reaction
+                            collision++;
+                            ANGLE_GEN();
+                            XI_GEN();
+                            r = -1 * log(xi) / (cap + scat + fis + n2n);
+                            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                            if(pow(x,2)+pow(y,2)+pow(z,2) < boundary) {
+                                n2n_cnt++, n2n_cnt_tmp++;
+                                n2n_point[n2n_cnt - 1][0] = n2n_cnt_tmp;
+                                n2n_point[n2n_cnt - 1][1] = x;
+                                n2n_point[n2n_cnt - 1][2] = y;
+                                n2n_point[n2n_cnt - 1][3] = z;
+                                n2n_point[n2n_cnt - 1][4] = incident_erg;
+                            }
+                            else{
+                                area_out++;
+                            }
+                            break;
+                        }
+                        else{  // scattering
+                            ANGLE_GEN();
+                            XI_GEN();
+                            r = -1 * log(xi) / (cap + scat +fis + n2n);
+                            x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                            if(pow(x,2)+pow(y,2)+pow(z,2) <= boundary){
+                                incident_erg *= atom_num / (atom_num + 1);
+                            }
+                            else{
+                                area_out++;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                else if(xi <= n2n_fraction){ // n2n reaction
+                    collision++;
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (cap + scat + fis + n2n);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) > boundary){
+                        area_out++;
+                        continue;
+                    }
+                    n2n_cnt++, n2n_cnt_tmp++;
+                    n2n_point[n2n_cnt - 1][0] = n2n_cnt_tmp;
+                    n2n_point[n2n_cnt - 1][1] = x;
+                    n2n_point[n2n_cnt - 1][2] = y;
+                    n2n_point[n2n_cnt - 1][3] = z;
+                    n2n_point[n2n_cnt - 1][4] = incident_erg;
+                }
+                else if(xi <= fis_fraction){ // fission reaction
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (cap + scat + fis + n2n);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) <= boundary){
+                        collision++;
+                        FISSION_NEUTRON_NUM();
+                        N_cnt += FN_num;
+                        fis_cnt++, fis_cnt_tmp++, std_fis++;
+                        fis_point[fis_cnt - 1][0] = fis_cnt_tmp;
+                        fis_point[fis_cnt - 1][1] = x;
+                        fis_point[fis_cnt - 1][2] = y;
+                        fis_point[fis_cnt - 1][3] = z;
+                    }
+                    else{
+                        area_out++;
+                    }
+                }
+                else{ // capture
+                    ANGLE_GEN();
+                    XI_GEN();
+                    r = -1 * log(xi) / (cap + scat +fis + n2n);
+                    x += r * sin_theta * cos_phi, y += r * sin_theta * sin_phi, z += r * cos_theta;
+                    if(pow(x,2)+pow(y,2)+pow(z,2) <= boundary){
+                        cap_cnt++, cap_cnt_tmp++;
+                    }
+                    else{
+                        area_out++;
+                    }
+                }
+            }
+        }
+
+        fission_neutron_per_cycle[i] = fis_cnt_tmp;
+        n2n_neutron_per_cycle[i] = n2n_cnt_tmp;
+        std_dev = (double)std_fis/std_nps;
+        std_dev = sqrt((std_dev)*(1-std_dev))/sqrt(std_nps);
+
+        // cout << "fission count : " << fission_neutron_per_cycle[i] << " capture count : " << cap_cnt << "  godiva area out : " << area_out << "    n2n : "<< n2n_neutron_per_cycle[i] << endl;
+        cout << fixed;
+        cout.precision(5);
+        cout << i+1 <<" cycle k-effective value : " << N_cnt/nps << endl;
+        // cout << i+1 <<" cycle k-effective value : " << fission_neutron_per_cycle[i]*2.5 / nps << endl;
+        keff[i] = N_cnt/nps;
+        if(i == skipped){
+            active_sum += keff[i];
+            active_sum_2 += pow(keff[i], 2);
+        }
+        // cout << active_sum << " " << active_sum_2 << endl;
+        if(i >= skipped + 1){
+            active_sum += keff[i];
+            active_sum_2 += pow(keff[i], 2);
+            x_bar = 1/(i - double(skipped) + 1) * active_sum;
+            x_bar_2 = 1/(i - double(skipped) + 1) * active_sum_2;
+            // cout << x_bar << " " << x_bar_2 << endl;
+            std_dev = 1/x_bar*sqrt((x_bar_2 - x_bar*x_bar)/(i - skipped));
+            st_dv[i] = std_dev;
+            // cout << "standard deviation : " << std_dev << endl;
+        }
+        N_cnt = 0;
+        cap_cnt = 0, area_out = 0;
+        fis_cnt = 0, fis_cnt_tmp = 0, collision = 0;
+        n2n_cnt = 0, n2n_cnt_tmp = 0;
+        cycle_alarm++;
+        // cout << "===================================================================" << endl;
+
+        for (int l = 0; l < 1000000; l++) {
+            for (int m = 0; m < 4; m++) {
+                fis_point_tmp[l][m] = fis_point[l][m];
+                n2n_point_tmp[l][m] = n2n_point[l][m];
+            }
+        }
+        for (int l = 0; l < 1000000; l++) {
+            for (int m = 0; m < 4; m++) {
+                fis_point[l][m] = 0;
+                n2n_point[l][m] = 0;
+            }// 다음 cycle fission 좌표 저장 위해 bank 초기화
+        }
+    }
+    for(int i=skipped; i<cycle; i++){
+        k_sum += keff[i];
+    }
+    for(int i=0; i<cycle; i++){
+        cout << st_dv[i] / 2 << endl;
+    }
+    cout << "average k-effective value : " << k_sum/(cycle-skipped) << "      standard deviation : " << std_dev << endl;
     finish = clock(), duration = (double)(finish - start) / CLOCKS_PER_SEC;
-    std::cout << "Computing Time : " << duration << "sec" << std::endl;
+    cout << "Computing Time : " << duration << "sec" << endl;
     return 0;
 }
 void XI_GEN() {
-    double vari;
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dis(1, 9999);
-    vari = dis(gen);
-    xi = vari / 10000;
+    xi = generate_random(); // 0과 1 사이의 난수 반환
 }
 void ANGLE_GEN() {
     XI_GEN();
@@ -425,26 +590,382 @@ void ANGLE_GEN() {
 }
 void FISSION_NEUTRON_NUM() {
     XI_GEN();
-    if (xi < 0.55) FN_num = 2;
+    if (xi <= 0.434) FN_num = 2;
     else FN_num = 3;
+    // cout << FN_num << endl;
 }
-void N_ENERGY_GEN() {
-    double vari1;
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dis(1, 1000000);
-    vari1 = dis(gen);
-    n_energy = vari1 / 100000;
+double N_ENERGY_GEN() {
+    return 10 * generate_random();
 }
-void NEUTRON_SPECTRA() {
-    double p_max = 0.35745, reaction1, p_n_energy;
+double P_N_ENERGY(double n_energy) {
+    return 0.4313 * sinh(sqrt(2.249 * n_energy)) * exp(-1 * n_energy / 0.988);
+}
+vector<double> FISSION_ENERGY(int num_simulations) {
+    vector<double> n_energy_values; // n_energy 값을 저장할 벡터
+    const double p_max = 0.342; // 최대 확률 밀도 값
+
+    for(int i = 0; i < num_simulations; ++i) {
+        double n_energy, p_n_energy_val;
+
+        while (true) {
+            n_energy = N_ENERGY_GEN();
+            p_n_energy_val = P_N_ENERGY(n_energy);
+            XI_GEN();
+
+            if (xi * p_max <= p_n_energy_val) {
+                n_energy_values.push_back(n_energy); // 조건을 만족하면 벡터에 저장
+                break; // 다음 시뮬레이션으로 넘어감
+            }
+        }
+    }
+
+    return n_energy_values;
+}
+void U235_capture() {
+    int idx = 0;
+    ifstream fin(file_path+"U235_capture.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (1) {
+        fin >> U235cap[idx][0];
+        fin >> U235cap[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U235_scattering() {
+    int idx = 0;
+    ifstream fin(file_path+"U235_elastic.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
     while (true) {
-        XI_GEN(), N_ENERGY_GEN();
-        p_n_energy = 0.4865 * sinh((sqrt(2 * n_energy)) * exp(-1 * n_energy));
-        reaction1 = p_n_energy / p_max;
-        if (reaction1 >= xi) {
-            incident_erg = n_energy*1000000;
+        fin >> U235scat[idx][0];
+        fin >> U235scat[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U235_fission() {
+    int idx = 0;
+    ifstream fin(file_path+"U235_fission.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U235fi[idx][0];
+        fin >> U235fi[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U238_capture() {
+    int idx = 0;
+    ifstream fin(file_path+"U238_capture.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U238cap[idx][0];
+        fin >> U238cap[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U238_scattering() {
+    int idx = 0;
+    ifstream fin(file_path+"U238_elastic.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U238scat[idx][0];
+        fin >> U238scat[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U238_fission() {
+    int idx = 0;
+    ifstream fin(file_path+"U238_fission.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U238fi[idx][0];
+        fin >> U238fi[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U234_capture(){
+    int idx = 0;
+    ifstream fin(file_path+"U234_capture.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U234cap[idx][0];
+        fin >> U234cap[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U234_scattering(){
+    int idx = 0;
+    ifstream fin(file_path+"U234_elastic.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U234scat[idx][0];
+        fin >> U234scat[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U234_fission(){
+    int idx = 0;
+    ifstream fin(file_path+"U234_fission.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U234fi[idx][0];
+        fin >> U234fi[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U234_n2n(){
+    int idx = 0;
+    ifstream fin(file_path+"U234_n2n.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U234n2n[idx][0];
+        fin >> U234n2n[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U235_n2n(){
+    int idx = 0;
+    ifstream fin(file_path+"U235_n2n.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U235n2n[idx][0];
+        fin >> U235n2n[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U238_n2n(){
+    int idx = 0;
+    ifstream fin(file_path+"U238_n2n.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U238n2n[idx][0];
+        fin >> U238n2n[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+
+void U234_inelastic(){
+    int idx = 0;
+    ifstream fin(file_path+"U234_inelastic.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U234inscat[idx][0];
+        fin >> U234inscat[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U235_inelastic(){
+    int idx = 0;
+    ifstream fin(file_path+"U235_inelastic.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U235inscat[idx][0];
+        fin >> U235inscat[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+void U238_inelastic(){
+    int idx = 0;
+    ifstream fin(file_path+"U238_inelastic.txt");
+    if (!fin) {
+        cerr << "Error, no such file exists" << endl;
+        exit(100);
+    }
+    while (true) {
+        fin >> U238inscat[idx][0];
+        fin >> U238inscat[idx][1];
+        idx++;
+        if (fin.eof())
+            break;
+    }
+    fin.close();
+}
+
+void XS_READER() {
+    int left = 0, right = 75959;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U235cap[mid][0] && incident_erg <= U235cap[mid+1][0]){
+            cap = (U235cap[mid][1] + U235cap[mid+1][1]) / 2;
+            scat = (U235scat[mid][1] + U235scat[mid+1][1]) / 2;
+            fis = (U235fi[mid][1] + U235fi[mid+1][1]) / 2;
             break;
         }
+        if(incident_erg >= U235cap[mid][0]) left = mid + 1;
+        else if(incident_erg < U235cap[mid][0]) right = mid -1;
+    }
+    left = 0, right = 156979;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U238cap[mid][0] && incident_erg <= U238cap[mid+1][0]){
+            cap += (U238cap[mid][1] + U238cap[mid+1][1]) / 2;
+            scat += (U238scat[mid][1] + U238scat[mid+1][1]) / 2;
+            fis += (U238fi[mid][1] + U238fi[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U238cap[mid][0]) left = mid + 1;
+        else if(incident_erg < U238cap[mid][0]) right = mid -1;
+    }
+    left = 0, right = 25319;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U234cap[mid][0] && incident_erg <= U234cap[mid+1][0]){
+            cap += (U234cap[mid][1] + U234cap[mid+1][1]) / 2;
+            scat += (U234scat[mid][1] + U234scat[mid+1][1]) / 2;
+            fis += (U234fi[mid][1] + U234fi[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U234cap[mid][0]) left = mid + 1;
+        else if(incident_erg < U234cap[mid][0]) right = mid -1;
+    }
+    n2n = 0;
+    left = 0, right = 170;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U234n2n[mid][0] && incident_erg <= U234n2n[mid+1][0]){
+            n2n += (U234n2n[mid][1] + U234n2n[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U234n2n[mid][0]) left = mid + 1;
+        else if(incident_erg < U234n2n[mid][0]) right = mid -1;
+    }
+    left = 0, right = 58;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U235n2n[mid][0] && incident_erg <= U235n2n[mid+1][0]){
+            n2n += (U235n2n[mid][1] + U235n2n[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U235n2n[mid][0]) left = mid + 1;
+        else if(incident_erg < U235n2n[mid][0]) right = mid -1;
+    }
+    left = 0, right = 106;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U238n2n[mid][0] && incident_erg <= U238n2n[mid+1][0]){
+            n2n += (U238n2n[mid][1] + U238n2n[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U238n2n[mid][0]) left = mid + 1;
+        else if(incident_erg < U238n2n[mid][0]) right = mid -1;
+    }
+    left = 0, right = 487;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U234inscat[mid][0] && incident_erg <= U234inscat[mid+1][0]){
+            scat += (U234inscat[mid][1] + U234inscat[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U234inscat[mid][0]) left = mid + 1;
+        else if(incident_erg < U234inscat[mid][0]) right = mid -1;
+    }
+    left = 0, right = 424;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U235inscat[mid][0] && incident_erg <= U235inscat[mid+1][0]){
+            scat += (U235inscat[mid][1] + U235inscat[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U235inscat[mid][0]) left = mid + 1;
+        else if(incident_erg < U235inscat[mid][0]) right = mid -1;
+    }
+    left = 0, right = 414;
+    while(left <= right){
+        int mid = (left + right) / 2;
+        if(incident_erg >= U238inscat[mid][0] && incident_erg <= U238inscat[mid+1][0]){
+            scat += (U238inscat[mid][1] + U238inscat[mid+1][1]) / 2;
+            break;
+        }
+        if(incident_erg >= U238inscat[mid][0]) left = mid + 1;
+        else if(incident_erg < U238inscat[mid][0]) right = mid -1;
+    }
+}
+void LCG() {
+    for (int i = 0; i < 10; i++) {
+        SEED[i+1] = fmod(g * SEED[i] + c, p);  // 모듈로 연산을 직접 수행
+        RN[i+1] = SEED[i+1] / p;  // 0~1 사이의 난수 생성
+        std::cout << RN[i+1] << std::endl;  // 생성된 난수 출력
     }
 }
